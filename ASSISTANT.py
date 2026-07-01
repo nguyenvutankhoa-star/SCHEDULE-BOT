@@ -4,6 +4,7 @@ import threading
 import time
 import ctypes
 import traceback
+import gc  # Thêm thư viện dọn rác bộ nhớ
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
@@ -60,19 +61,17 @@ class UltimateUniversalAssistant:
         
         self.show_setup_wizard()
         
-        # Gọi hàm ép Widget chìm xuống dưới cùng để chống giật lag khi ra màn hình chính
+        # Gọi hàm ép Widget chìm xuống dưới cùng
         self.root.after(200, self.pin_to_desktop)
 
-    # TỐI ƯU 1: Ép Widget ghim chặt vào nền Windows bằng ctypes
     def pin_to_desktop(self):
         try:
             hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-            # 1 = HWND_BOTTOM (Dưới cùng), 0x0013 = Giữ nguyên tọa độ, kích thước và không chiếm focus
             ctypes.windll.user32.SetWindowPos(hwnd, 1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010)
         except Exception:
             pass
-        # Lặp lại sau mỗi 2 giây để đảm bảo Win+D không làm mất Widget
-        self.root.after(2000, self.pin_to_desktop)
+        # Đổi thành 5000ms (5 giây) để giảm tải cho CPU và tránh hiện tượng giật lag WinAPI
+        self.root.after(5000, self.pin_to_desktop)
 
     def load_config(self):
         config = {}
@@ -310,7 +309,6 @@ class UltimateUniversalAssistant:
             time.sleep(5)
 
     def spkt_engine(self):
-        # TỐI ƯU 2: Delay 5 giây trước khi mở Chrome để giao diện UI được render mượt mà 100% trước
         time.sleep(5) 
         while True:
             raw_table_data = self.crawl_spkt()
@@ -318,6 +316,9 @@ class UltimateUniversalAssistant:
                 with open(FILE_CACHE, "w", encoding="utf-8") as f:
                     f.write(raw_table_data)
             self.root.after(0, self.render_today_schedule)
+            
+            # Thu hồi rác bộ nhớ do Selenium để lại để tránh đầy RAM
+            gc.collect() 
             time.sleep(7200)
 
     def render_today_schedule(self):
@@ -340,40 +341,36 @@ class UltimateUniversalAssistant:
 
     def crawl_spkt(self):
         opts = Options()
-        # 1. TẠM TẮT HEADLESS ĐỂ XEM BOT LÀM GÌ TRÊN MÀN HÌNH
-        # opts.add_argument("--headless") 
+        
+        # CÁC CỜ TỐI ƯU HÓA TỐI ĐA CHO SELENIUM TRÁNH LAG MÁY
+        opts.add_argument("--headless=new") # Bắt buộc chạy nền chuẩn mới
         opts.add_argument("--log-level=3")
+        opts.add_argument("--disable-gpu") # Tắt xử lý đồ họa
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--blink-settings=imagesEnabled=false") # Không tải hình ảnh để web load tức thì
         
-        # 2. Bỏ các chế độ ép chạy nhanh để tránh web trường load chưa kịp
-        # opts.page_load_strategy = 'eager' 
+        opts.page_load_strategy = 'eager' # Chỉ đợi HTML DOM, không đợi toàn bộ tài nguyên
         
-        from selenium.webdriver.chrome.service import Service
-        from subprocess import CREATE_NO_WINDOW
         srv = Service()
         srv.creation_flags = CREATE_NO_WINDOW
         
         driver = None
         try:
-            print("🚀 Bắt đầu mở Chrome...")
             driver = webdriver.Chrome(options=opts, service=srv)
             
-            # 3. Nới lỏng thời gian chờ đợi cho bot
             driver.set_page_load_timeout(30)
-            driver.implicitly_wait(10)
+            driver.implicitly_wait(5)
             
-            print("🌐 Đang truy cập web trường...")
             driver.get(self.config.get("SCHOOL_URL", ""))
-            time.sleep(3) # Đợi web tải ổn định
-
+            
             if "login" in driver.current_url.lower() or "đăng nhập" in driver.page_source.lower():
-                print("🔑 Đang nhập tài khoản...")
                 driver.find_element(By.XPATH, "//input[@type='text' and not(@hidden)] | //input[contains(@name, 'User')]").send_keys(self.config.get("MY_STUDENT_ID", ""))
                 driver.find_element(By.XPATH, "//input[@type='password']").send_keys(self.config.get("MY_PASSWORD", ""))
                 driver.find_element(By.XPATH, "//button[@type='submit'] | //input[@type='submit']").click()
-                print("⏳ Đang chờ tải thời khóa biểu...")
-                time.sleep(6) # Đợi web trường xử lý sau khi bấm đăng nhập
+                time.sleep(3) # Giảm thời gian chờ do web không tải ảnh nữa
 
-            print("📊 Đang đọc dữ liệu bảng...")
             soup = BeautifulSoup(driver.page_source, "html.parser")
             rows = soup.find_all("tr")
             extracted_rows = []
@@ -382,14 +379,10 @@ class UltimateUniversalAssistant:
                 if any(cols):
                     extracted_rows.append(" | ".join(cols))
             
-            print("✅ Đã lấy xong dữ liệu!")
             return "\n".join(extracted_rows)
 
         except Exception as e:
-           # Lấy toàn bộ chi tiết mã lỗi từ chân tơ kẽ tóc
             error_detail = traceback.format_exc()
-            
-            # Ép hệ thống bắn bảng thông báo đỏ chót ra giữa màn hình
             self.root.after(0, lambda: messagebox.showerror(
                 "🚨 BẮT ĐƯỢC BỆNH CỦA FILE EXE", 
                 f"Bot báo cáo lý do không lấy được TKB:\n\n{error_detail}"
@@ -397,8 +390,10 @@ class UltimateUniversalAssistant:
             return None
         finally:
             if driver:
-                try: driver.quit()
-                except Exception: pass
+                try: 
+                    driver.quit()
+                except Exception: 
+                    pass
 
 if __name__ == "__main__":
     root = tk.Tk()
